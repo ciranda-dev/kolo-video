@@ -1,0 +1,12 @@
+kv_malloc
+kv_free
+kv_enc_new
+kv_enc_free
+kv_encode
+kv_next_frame
+kv_set_bitrate
+kv_dec_new
+kv_dec_free
+kv_decode
+kv_version
+kv_abi_version

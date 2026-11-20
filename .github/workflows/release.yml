@@ -1,0 +1,48 @@
+name: release
+
+# Provenance for the files a consumer runs: the six native libraries, the wasm and the
+# generated Go. It has not run yet.
+on:
+  # no automatic trigger: run by hand (workflow_dispatch) when a provenance attestation is wanted
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  attest:
+    # The pinned wasm toolchain is the arm64 wasi-sdk, so the rebuild runs on an arm64 host.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache: true
+          cache-dependency-path: build/tools/go.sum
+
+      - name: emulation for the linux/amd64 images
+        run: docker run --privileged --rm tonistiigi/binfmt --install amd64
+
+      - name: the committed artifacts match their hashes, the generated Go and the symbols
+        run: build/verify.sh
+
+      - name: the wasm rebuilds byte for byte in this run
+        run: |
+          build/libvpx/build.sh --out "$RUNNER_TEMP/build" wasm
+          cmp "$RUNNER_TEMP/build/kolovpx.wasm" build/libvpx/kolovpx.wasm
+
+      - name: attest the committed files
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            vpx/internal/native/libkolovpx-*
+            build/libvpx/kolovpx.wasm
+            vpx/internal/portable/libvpx.go
+            vpx/internal/portable/wasm/**/*.go

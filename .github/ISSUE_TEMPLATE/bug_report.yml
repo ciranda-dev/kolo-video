@@ -1,0 +1,53 @@
+name: Bug report
+description: Report something that does not work as it should
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: "What happened"
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: "What you expected"
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: "Steps to reproduce"
+      description: "Short steps, or a small program that shows it."
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: "Version of the library"
+      description: "The tag you use, or the commit."
+      placeholder: "v0.1.x"
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: "Go version and operating system"
+      placeholder: "go1.26, macOS 15"
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: "Logs or output"
+      description: "Remove keys, tokens, names and addresses before pasting."
+      render: shell
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: "Before you send"
+      options:
+        - label: "I searched the existing issues and did not find this one"
+          required: true
+        - label: "This is not a security problem (those go to the [private report](https://github.com/ciranda-dev/kolo-video/security/advisories/new))"
+          required: true

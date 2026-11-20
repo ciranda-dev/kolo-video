@@ -1,0 +1,513 @@
+name: ci
+
+on:
+  # no automatic triggers: the jobs run by hand (workflow_dispatch)
+  workflow_dispatch:
+    inputs:
+      go-version:
+        description: Go version for the go-next job, for example a release candidate
+        default: stable
+
+permissions:
+  contents: read
+
+env:
+  CGO_ENABLED: "0"
+
+jobs:
+  cross:
+    name: vet and build (${{ matrix.goos }}/${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {goos: darwin, goarch: arm64}
+          - {goos: darwin, goarch: amd64}
+          - {goos: linux, goarch: arm64}
+          - {goos: linux, goarch: amd64}
+          - {goos: windows, goarch: arm64}
+          - {goos: windows, goarch: amd64}
+          - {goos: linux, goarch: "386"}
+          - {goos: linux, goarch: riscv64}
+          - {goos: freebsd, goarch: amd64}
+    env:
+      GOOS: ${{ matrix.goos }}
+      GOARCH: ${{ matrix.goarch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache: true
+          cache-dependency-path: go.mod
+
+      - name: gofmt
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then echo "$out"; exit 1; fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go build
+        run: go build ./...
+
+      - name: go vet and build with the native engine on Linux
+        if: matrix.goos == 'linux' && (matrix.goarch == 'amd64' || matrix.goarch == 'arm64')
+        run: |
+          go vet -tags kolovideo_native ./...
+          go build -tags kolovideo_native ./...
+
+  h264-cross:
+    # The h264 package has no engine on most targets and must still vet and build everywhere
+    # (android and ios need cgo to link and are left out). It does not import vpx.
+    name: h264 vet and build (every target)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache: true
+          cache-dependency-path: go.mod
+
+      - name: vet and build ./h264 for every target
+        run: |
+          n=0
+          for t in $(go tool dist list | grep -v -e '^android/' -e '^ios/'); do
+            GOOS=${t%/*} GOARCH=${t#*/} go vet ./h264
+            GOOS=${t%/*} GOARCH=${t#*/} go build ./h264
+            n=$((n+1))
+          done
+          echo "vetted and built $n targets"
+
+      - name: h264 does not link purego or cgo on Linux
+        run: |
+          for a in amd64 arm64 386; do
+            deps=$(GOOS=linux GOARCH=$a go list -deps ./h264)
+            if printf '%s\n' "$deps" | grep -e purego -e '^runtime/cgo$'; then
+              echo "linux/$a links purego or runtime/cgo"; exit 1
+            fi
+          done
+
+  h264-test:
+    # The real system codecs where the runner has them: VideoToolbox on macOS, Media Foundation on
+    # Windows, and the typed absence on Linux. GitHub's macOS runners are virtual machines whose
+    # VideoToolbox may have no hardware encoder, and its Windows runners may have no H.264
+    # transforms; the tests skip with the system's message in that case and the log shows it.
+    # KOLOVIDEO_H264_REQUIRE is not set here: only a machine known to have the codec sets it.
+    name: h264 test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, macos-15-intel, windows-11-arm, windows-latest, ubuntu-latest, ubuntu-24.04-arm]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache: true
+          cache-dependency-path: go.mod
+
+      - name: go test ./h264
+        run: go test -count=1 -timeout 30m -v ./h264
+
+      - name: what this system reports
+        run: go run ./examples/h264 -cache "${{ runner.temp }}"
+
+  test:
+    # Both engines: macOS and Windows build the native engine by default; Linux needs the tag
+    # for its second pass.
+    name: test (${{ matrix.os }}, go ${{ matrix.go }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-latest, go: "1.26"}
+          - {os: ubuntu-latest, go: stable}
+          - {os: ubuntu-24.04-arm, go: stable}
+          - {os: macos-latest, go: stable}
+          - {os: macos-15-intel, go: stable}
+          - {os: windows-latest, go: stable}
+          - {os: windows-11-arm, go: stable}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ matrix.go }}
+          cache: true
+          cache-dependency-path: go.mod
+
+      - name: go test
+        run: go test -count=1 -timeout 30m ./...
+
+      - name: go test with the native engine (Linux)
+        if: runner.os == 'Linux'
+        run: go test -count=1 -timeout 30m -tags kolovideo_native ./...
+
+      - name: which engines ran
+        run: go test -count=1 -run TestRoundTrip -v ./vpx
+
+  race:
+    name: race (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    env:
+      CGO_ENABLED: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache: true
+          cache-dependency-path: go.mod
+
+      # The whole portable package takes over 25 minutes under the race detector.
+      - name: go test -race (capture and the codec concurrency tests)
+        run: |
+          go test -race -count=1 .
+          go test -race -count=1 -run 'TestConcurrentUse|TestEncoderErrors' ./vpx
+          go test -race -count=1 -short ./h264
+          go test -race -count=1 ./vpx/internal/native
+
+  go-next:
+    # The Go release that purego's no-cgo runtime support has to follow: scheduled with the newest
+    # stable Go, or run by hand with a release candidate.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    name: go ${{ inputs.go-version || 'stable' }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ inputs.go-version || 'stable' }}
+          check-latest: true
+
+      - run: go vet ./...
+
+      - run: go test -count=1 -timeout 30m ./...
+
+  test-32bit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache: true
+          cache-dependency-path: go.mod
+
+      - name: go test (linux/386, capture and conversion)
+        run: GOARCH=386 go test -count=1 .
+
+      - name: the codec tests build for linux/386
+        run: GOARCH=386 go test -c -o /dev/null ./vpx
+
+      - name: h264 tests (linux/386)
+        run: GOARCH=386 go test -count=1 ./h264
+
+  macos-no-compiler:
+    # A Mac with no usable C compiler must still build with CGO_ENABLED=0.
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+
+      - name: build and test with a failing cc first on PATH
+        run: |
+          shim=$(mktemp -d)
+          printf '#!/bin/sh\necho "cc: no compiler" >&2\nexit 1\n' >"$shim/cc"
+          cp "$shim/cc" "$shim/gcc"
+          cp "$shim/cc" "$shim/clang"
+          chmod +x "$shim/cc" "$shim/gcc" "$shim/clang"
+          PATH="$shim:$PATH" CGO_ENABLED=0 go build ./...
+          PATH="$shim:$PATH" CGO_ENABLED=0 go run ./examples/vp8 -cache "$RUNNER_TEMP/kv"
+          test ! -e "$HOME/Library/Caches/kolo-video"
+          PATH="$shim:$PATH" CGO_ENABLED=0 go test -count=1 -run 'TestRealListing|TestAVFListing|TestRoundTrip' . ./vpx
+          PATH="$shim:$PATH" CGO_ENABLED=0 go test -count=1 ./h264
+          PATH="$shim:$PATH" CGO_ENABLED=0 go run ./examples/h264 -cache "$RUNNER_TEMP/kv"
+
+  linux-no-compiler:
+    # A machine with no usable C compiler builds static binaries with CGO_ENABLED=0.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache: true
+          cache-dependency-path: go.mod
+
+      - name: build with a failing cc first on PATH
+        run: |
+          shim=$(mktemp -d)
+          printf '#!/bin/sh\necho "cc: no compiler" >&2\nexit 1\n' >"$shim/cc"
+          cp "$shim/cc" "$shim/gcc"
+          chmod +x "$shim/cc" "$shim/gcc"
+          PATH="$shim:$PATH" CGO_ENABLED=0 go build ./...
+          PATH="$shim:$PATH" CGO_ENABLED=0 go build -tags kolovideo_native ./...
+          # With cgo on, purego imports runtime/cgo: the tagged build then needs a working compiler.
+          if PATH="$shim:$PATH" CGO_ENABLED=1 go build -tags kolovideo_native ./... 2>"$RUNNER_TEMP/cgo.txt"; then
+            echo "the tagged build with cgo on and a failing cc passed"; exit 1
+          fi
+          grep -q 'runtime/cgo' "$RUNNER_TEMP/cgo.txt"
+          PATH="$shim:$PATH" CGO_ENABLED=0 go build -o "$RUNNER_TEMP/vp8" ./examples/vp8
+          file "$RUNNER_TEMP/vp8" | tee "$RUNNER_TEMP/file.txt"
+          grep -q 'statically linked' "$RUNNER_TEMP/file.txt"
+          "$RUNNER_TEMP/vp8" | tee "$RUNNER_TEMP/run.txt"
+          grep -q 'portable engine' "$RUNNER_TEMP/run.txt"
+
+  alpine:
+    # The default build on a system with no glibc: the portable engine, static binary.
+    name: alpine and distroless (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {runner: ubuntu-latest, arch: amd64}
+          - {runner: ubuntu-24.04-arm, arch: arm64}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache: true
+          cache-dependency-path: go.mod
+
+      - name: build the codec tests without a tag
+        run: |
+          go test -c -o "$RUNNER_TEMP/vpx.test" ./vpx
+          file "$RUNNER_TEMP/vpx.test" | tee "$RUNNER_TEMP/file.txt"
+          grep -q 'statically linked' "$RUNNER_TEMP/file.txt"
+
+      - name: run them on alpine and distroless static
+        run: |
+          for image in alpine:3 gcr.io/distroless/static-debian12; do
+            docker run --rm --network none -v "$RUNNER_TEMP:/t:ro" --entrypoint /t/vpx.test "$image" \
+              -test.run TestRoundTrip -test.v | tee "$RUNNER_TEMP/out.txt"
+            grep -q 'engine=portable' "$RUNNER_TEMP/out.txt"
+            grep -q '^PASS' "$RUNNER_TEMP/out.txt"
+          done
+
+      - name: h264 tests and the absence message on alpine and distroless
+        run: |
+          go test -c -o "$RUNNER_TEMP/h264.test" ./h264
+          go build -o "$RUNNER_TEMP/h264" ./examples/h264
+          for f in h264.test h264; do
+            file "$RUNNER_TEMP/$f" | tee "$RUNNER_TEMP/file.txt"
+            grep -q 'statically linked' "$RUNNER_TEMP/file.txt"
+          done
+          for image in alpine:3 gcr.io/distroless/static-debian12; do
+            docker run --rm --network none -v "$RUNNER_TEMP:/t:ro" -v "$PWD/h264:/pkg:ro" -w /pkg \
+              --entrypoint /t/h264.test "$image" -test.v | tee "$RUNNER_TEMP/out.txt"
+            grep -q '^PASS' "$RUNNER_TEMP/out.txt"
+            docker run --rm --network none -v "$RUNNER_TEMP:/t:ro" --entrypoint /t/h264 "$image" | tee "$RUNNER_TEMP/out.txt"
+            grep -q 'no H.264 engine on linux/' "$RUNNER_TEMP/out.txt"
+            grep -q 'VP8 through libvpx' "$RUNNER_TEMP/out.txt"
+          done
+
+  validate-linux:
+    # build/validate/linux.sh: static and native binaries in Debian, Ubuntu, Alpine and distroless
+    # images, and the hostile cases of the loader (seccomp, noexec, no /proc, old glibc).
+    name: validate on linux (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {runner: ubuntu-latest, arch: amd64}
+          - {runner: ubuntu-24.04-arm, arch: arm64}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache: true
+          cache-dependency-path: go.mod
+
+      - name: linux.sh
+        run: build/validate/linux.sh ${{ matrix.arch }}
+
+  zero-install:
+    # Clean container: no C compiler, no pkg-config, no libvpx, CC and CGO_ENABLED unset.
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: download modules
+        run: |
+          mkdir "$RUNNER_TEMP/modcache"
+          docker run --rm -v "$PWD:/src:ro" -v "$RUNNER_TEMP/modcache:/go/pkg/mod" -w /src \
+            golang:1.27-alpine go mod download
+
+      - name: build and test with no network
+        run: |
+          docker run --rm --network none -e GOPROXY=off \
+            -v "$PWD:/src:ro" -v "$RUNNER_TEMP/modcache:/go/pkg/mod:ro" -w /src golang:1.27-alpine sh -c '
+            set -eu
+            unset CC CGO_ENABLED
+            for tool in cc gcc g++ clang pkg-config pkgconf; do
+              if command -v "$tool"; then echo "$tool is installed"; exit 1; fi
+            done
+            test "$(go env CGO_ENABLED)" = 0
+            export GOCACHE=/tmp/gocache GOFLAGS=-mod=readonly
+            for t in darwin/arm64 darwin/amd64 linux/arm64 linux/amd64 windows/arm64 windows/amd64 linux/386 linux/riscv64; do
+              GOOS=${t%/*} GOARCH=${t#*/} go build -o /dev/null ./...
+              echo "built $t"
+            done
+            go build -tags kolovideo_native -o /dev/null ./...
+            go build -o /tmp/vp8 ./examples/vp8
+            go build -o /tmp/snapshot ./examples/snapshot
+            go build -o /tmp/h264 ./examples/h264
+            /tmp/vp8 -cache /tmp/kv
+            /tmp/snapshot -list
+            /tmp/h264 -cache /tmp/kv | tee /tmp/h264.txt
+            grep -q "no H.264 engine on linux/" /tmp/h264.txt
+            go test -count=1 -timeout 30m ./...
+          '
+
+  artifacts:
+    # The pinned wasm toolchain is the arm64 wasi-sdk, so the rebuild runs on an arm64 host. The
+    # wasm must rebuild byte for byte; the libraries are rebuilt and compared but not blocking.
+    name: artifacts (rebuild and hash)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache: true
+          cache-dependency-path: build/tools/go.sum
+
+      - name: emulation for the linux/amd64 images
+        run: docker run --privileged --rm tonistiigi/binfmt --install amd64
+
+      - name: hashes, regenerated Go, notices, symbols
+        run: build/verify.sh
+
+      - name: rebuild the wasm and compare
+        run: |
+          build/libvpx/build.sh --out "$RUNNER_TEMP/build" wasm
+          cmp "$RUNNER_TEMP/build/kolovpx.wasm" build/libvpx/kolovpx.wasm
+
+      - name: rebuild the Linux and Windows libraries and report differences
+        run: |
+          build/libvpx/build.sh --out "$RUNNER_TEMP/build" linux-amd64 linux-arm64 windows-amd64 windows-arm64
+          for f in "$RUNNER_TEMP"/build/libkolovpx-*; do
+            if cmp -s "$f" "vpx/internal/native/$(basename "$f")"; then
+              echo "$(basename "$f"): rebuild identical"
+            else
+              echo "$(basename "$f"): rebuild differs (reported, not blocking)"
+            fi
+          done
+
+  artifacts-macos:
+    # The dylibs: symbols, deployment target, SDK and signature of the committed files. The
+    # pinned Xcode may differ from the runner's; verify.sh reports that without failing.
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache: true
+          cache-dependency-path: build/tools/go.sum
+
+      - run: build/verify.sh
+
+  regen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache: true
+          cache-dependency-path: build/tools/go.sum
+
+      - name: regenerate the Go from the committed wasm
+        run: build/regen.sh
+
+      - name: generated code is unchanged
+        run: git diff --exit-code
+
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      GOFLAGS: -tags=kolovideo_native
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache: true
+          cache-dependency-path: go.mod
+
+      - name: fuzz each target for 20s
+        run: |
+          pkgs=$(go list ./...)
+          n=0
+          for p in $pkgs; do
+            targets=$(go test -list '^Fuzz' "$p")
+            for f in $(printf '%s\n' "$targets" | grep '^Fuzz' || true); do
+              echo "== $p $f"
+              go test -run='^$' -fuzz="^${f}\$" -fuzztime=20s -fuzzminimizetime=5s "$p"
+              n=$((n+1))
+            done
+          done
+          if [ "$n" -eq 0 ]; then
+            echo "no fuzz targets found"
+            exit 1
+          fi
+
+      - name: upload failing inputs
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-failures
+          path: '**/testdata/fuzz'
+          if-no-files-found: ignore

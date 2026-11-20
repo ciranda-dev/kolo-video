@@ -1,0 +1,7 @@
+9331b3a089ee62f67bd80dd54946198d4ef0f70ff4ad116ca72b456b3b9aa95d  kolovpx.wasm
+1cc7865e7566b5b3d2447344a4bb0ff06f80f767ccfb6d4126b08defa3c6035a  ../../vpx/internal/native/libkolovpx-darwin-amd64.dylib
+fe72b1a12433d66e5643898a423f04b8efec2c0e76d186097d4b10f3205a6623  ../../vpx/internal/native/libkolovpx-darwin-arm64.dylib
+353486ab968b0791a4bafed53e8703b01576f77fa399463f414ef754fd5c0545  ../../vpx/internal/native/libkolovpx-linux-amd64.so
+18458692eb9a25adf1d05152c28a2d66cb924c58e8f566479d2416400c611a40  ../../vpx/internal/native/libkolovpx-linux-arm64.so
+3ea9549a01360b4d6bcd28d3c33e928311e214789fbcf850bdb8c95ff7823286  ../../vpx/internal/native/libkolovpx-windows-amd64.dll
+7213247f82d872dccb0b8967764b28fdbae69abcfe89cde8b904c7d3555254f7  ../../vpx/internal/native/libkolovpx-windows-arm64.dll
